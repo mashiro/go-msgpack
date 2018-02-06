@@ -117,7 +117,6 @@ INDIRECT:
 		return e.EncodeNil()
 	}
 
-	v = rv.Interface()
 	switch rv.Kind() {
 	case reflect.Slice:
 		return e.EncodeArray(v)
@@ -381,7 +380,7 @@ func (e *Encoder) EncodeMap(v interface{}) error {
 var tags = []string{`msgpack`, `msg`}
 
 func parseMsgpackTag(rv reflect.StructField) (string, bool) {
-	var name = rv.Name
+	var name = ""
 	var omitempty bool
 
 	// We will support both msg and msgpack tags, the former
@@ -401,6 +400,24 @@ LOOP:
 		}
 	}
 	return name, omitempty
+}
+
+type structField struct {
+	typ   reflect.Type
+	index []int
+}
+
+func structFieldByIndex(v reflect.Value, index []int) reflect.Value {
+	for _, i := range index {
+		if v.Kind() == reflect.Ptr {
+			if v.IsNil() {
+				return reflect.Value{}
+			}
+			v = v.Elem()
+		}
+		v = v.Field(i)
+	}
+	return v
 }
 
 // EncodeStruct encodes a struct value as a map object.
@@ -423,26 +440,48 @@ func (e *Encoder) EncodeStruct(v interface{}) error {
 	}
 	mapb := NewMapBuilder()
 
-	rt := rv.Type()
-	for i := 0; i < rt.NumField(); i++ {
-		ft := rt.Field(i)
-		if ft.PkgPath != "" {
-			continue
-		}
+	queue := []structField{{
+		typ:   rv.Type(),
+		index: []int{},
+	}}
 
-		name, omitempty := parseMsgpackTag(ft)
-		if name == "-" {
-			continue
-		}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		rt := current.typ
 
-		field := rv.Field(i)
-		if omitempty {
-			if reflect.DeepEqual(field.Interface(), reflect.Zero(field.Type()).Interface()) {
+		for i := 0; i < rt.NumField(); i++ {
+			ft := rt.Field(i)
+			if ft.PkgPath != "" {
 				continue
 			}
-		}
 
-		mapb.Add(name, field.Interface())
+			name, omitempty := parseMsgpackTag(ft)
+			if name == "-" {
+				continue
+			}
+
+			index := make([]int, len(current.index)+1)
+			copy(index, current.index)
+			index[len(current.index)] = i
+
+			field := structFieldByIndex(rv, index)
+
+			if omitempty {
+				if reflect.DeepEqual(field.Interface(), reflect.Zero(field.Type()).Interface()) {
+					continue
+				}
+			}
+
+			if name != "" || !ft.Anonymous {
+				if name == "" {
+					name = ft.Name
+				}
+				mapb.Add(name, field.Interface())
+			} else {
+				queue = append(queue, structField{typ: ft.Type, index: index})
+			}
+		}
 	}
 
 	if err := mapb.Encode(e.dst); err != nil {
